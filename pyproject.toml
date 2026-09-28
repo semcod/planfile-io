@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "planfile-io"
+version = "0.1.0"
+description = "High-performance native I/O engine for planfile"
+authors = [{ name = "Tom Sapletta", email = "tom@sapletta.com" }]
+license = { text = "Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "planfile_io.planfile_io_rs"
+python-source = "python"
+binding = "pyo3"
