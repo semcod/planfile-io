@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 pub const MIRROR_SUFFIX: &str = ".fast.json";
+pub const MIRROR_VERSION: u64 = 1;
 
 pub fn mirror_path(yaml_path: &Path) -> PathBuf {
     let mut name = yaml_path.file_name().unwrap_or_default().to_os_string();
@@ -19,6 +20,17 @@ pub fn stat_mtime_ns(path: &Path) -> Option<u128> {
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_nanos())
+}
+
+pub fn stat_size_and_mtime_ns(path: &Path) -> Option<(u64, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos() as u64;
+    Some((meta.len(), mtime))
 }
 
 /// Convert YAML AST to JSON AST (preserving strings, numbers, booleans, maps, arrays)
@@ -61,43 +73,108 @@ pub fn yaml_to_json_val(val: YamlValue) -> JsonValue {
     }
 }
 
+fn extract_mirror_mtime(parsed: &JsonValue) -> Option<u128> {
+    if parsed.get("version").and_then(|v| v.as_u64()) != Some(MIRROR_VERSION) {
+        return None;
+    }
+    parsed
+        .get("yaml_mtime_ns")
+        .or_else(|| parsed.get("mtime_ns"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u128)
+}
+
+pub fn write_mirror_envelope(mirror: &Path, mtime_ns: u64, data: &JsonValue) -> Result<(), String> {
+    let mirror_envelope = serde_json::json!({
+        "version": MIRROR_VERSION,
+        "yaml_mtime_ns": mtime_ns,
+        "mtime_ns": mtime_ns,
+        "data": data
+    });
+    let serialized = serde_json::to_string(&mirror_envelope).map_err(|e| e.to_string())?;
+    atomic_write_str(mirror, &serialized).map_err(|e| e.to_string())
+}
+
 pub fn read_yaml_fast(yaml_path: &Path) -> Result<JsonValue, String> {
     let mirror = mirror_path(yaml_path);
-    let current_mtime = stat_mtime_ns(yaml_path).unwrap_or(0);
+    let Some(current_mtime) = stat_mtime_ns(yaml_path) else {
+        return Err(format!("Failed to stat YAML {}", yaml_path.display()));
+    };
 
-    // 1. Sprawdź mirror .fast.json
+    // 1. Check .fast.json mirror (supports both `yaml_mtime_ns` and `mtime_ns`)
     if mirror.exists() {
         if let Ok(content) = fs::read_to_string(&mirror) {
             if let Ok(parsed) = serde_json::from_str::<JsonValue>(&content) {
-                if let Some(cached_mtime) = parsed.get("mtime_ns").and_then(|v| v.as_u64()) {
-                    if (cached_mtime as u128) == current_mtime {
-                        if let Some(data) = parsed.get("data") {
-                            return Ok(data.clone());
-                        }
+                if extract_mirror_mtime(&parsed) == Some(current_mtime) {
+                    if let Some(data) = parsed.get("data") {
+                        return Ok(data.clone());
                     }
                 }
             }
         }
     }
 
-    // 2. Cache miss: Parsuj YAML
+    // 2. Cache miss: Parse YAML
     let yaml_raw = fs::read_to_string(yaml_path)
         .map_err(|e| format!("Failed to read YAML {}: {}", yaml_path.display(), e))?;
 
     let yaml_val: YamlValue = serde_yaml::from_str(&yaml_raw)
         .map_err(|e| format!("YAML syntax error in {}: {}", yaml_path.display(), e))?;
 
-    let json_val = yaml_to_json_val(yaml_val);
+    let json_val = match yaml_to_json_val(yaml_val) {
+        JsonValue::Null => JsonValue::Object(serde_json::Map::new()),
+        other => other,
+    };
 
-    // 3. Zapisz mirror .fast.json (best-effort)
-    let mirror_envelope = serde_json::json!({
-        "version": 1,
-        "mtime_ns": current_mtime as u64,
-        "data": &json_val
-    });
-    if let Ok(serialized) = serde_json::to_string(&mirror_envelope) {
-        let _ = atomic_write_str(&mirror, &serialized);
+    // 3. TOCTOU guard: re-stat immediately after reading before caching mirror
+    if stat_mtime_ns(yaml_path) == Some(current_mtime) {
+        let _ = write_mirror_envelope(&mirror, current_mtime as u64, &json_val);
     }
 
     Ok(json_val)
+}
+
+/// Audit on-disk `.fast.json` mirror against authoritative YAML and self-heal on drift.
+pub fn audit_mirror_fast(yaml_path: &Path) -> (bool, bool, Option<String>) {
+    if !yaml_path.exists() {
+        return (true, false, None);
+    }
+    let yaml_raw = match fs::read_to_string(yaml_path) {
+        Ok(r) => r,
+        Err(e) => return (false, false, Some(format!("YAML unreadable: {e}"))),
+    };
+    let yaml_val: YamlValue = match serde_yaml::from_str(&yaml_raw) {
+        Ok(v) => v,
+        Err(e) => return (false, false, Some(format!("YAML unparsable: {e}"))),
+    };
+    let fresh = match yaml_to_json_val(yaml_val) {
+        JsonValue::Null => JsonValue::Object(serde_json::Map::new()),
+        other => other,
+    };
+    let mirror = mirror_path(yaml_path);
+    if !mirror.exists() {
+        return (true, false, None);
+    }
+    let mut reason: Option<String> = None;
+    match fs::read_to_string(&mirror)
+        .ok()
+        .and_then(|s| serde_json::from_str::<JsonValue>(&s).ok())
+    {
+        Some(parsed) => {
+            if parsed.get("data") != Some(&fresh) {
+                reason = Some("cached mirror disagrees with a fresh YAML parse".to_string());
+            }
+        }
+        None => {
+            reason = Some("mirror unreadable or invalid JSON".to_string());
+        }
+    }
+    if let Some(r) = reason {
+        if let Some(mtime) = stat_mtime_ns(yaml_path) {
+            let healed = write_mirror_envelope(&mirror, mtime as u64, &fresh).is_ok();
+            return (false, healed, Some(r));
+        }
+        return (false, false, Some(r));
+    }
+    (true, false, None)
 }

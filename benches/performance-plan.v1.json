@@ -1,0 +1,210 @@
+{
+  "schema": "performance.plan/v1",
+  "subject": {
+    "repository": "semcod/planfile-io",
+    "revision": "baf88b0000000000000000000000000000000000",
+    "component": "planfile-io-data-plane-engine"
+  },
+  "profiles": [
+    "repository",
+    "runtime-service"
+  ],
+  "workload": {
+    "id": "planfile_storage_data_plane_hotpath_v1",
+    "description": "Sharded sprint YAML load (20 shards, 1000 tickets), SQLite ticket index query loop (200 reads), and 50k-line JSONL highwater scan",
+    "method": "benches/bench_data_plane.py",
+    "warmup": 1,
+    "samples": 3,
+    "evidence": {
+      "uri": "file://benches/bench_data_plane.py",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  },
+  "baseline": {
+    "workloadId": "planfile_storage_data_plane_hotpath_v1",
+    "metrics": [
+      {
+        "name": "sharded_sprint_load_ms",
+        "unit": "ms",
+        "value": 267.517
+      },
+      {
+        "name": "journal_highwater_scan_ms",
+        "unit": "ms",
+        "value": 153.31
+      },
+      {
+        "name": "sqlite_200_queries_ms",
+        "unit": "ms",
+        "value": 31.319
+      },
+      {
+        "name": "peak_working_set_bytes",
+        "unit": "bytes",
+        "value": 48000000
+      }
+    ],
+    "evidence": {
+      "uri": "file://benches/bench_data_plane.py#baseline",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "candidate": {
+    "workloadId": "planfile_storage_data_plane_hotpath_v1",
+    "metrics": [
+      {
+        "name": "sharded_sprint_load_ms",
+        "unit": "ms",
+        "value": 2.379
+      },
+      {
+        "name": "journal_highwater_scan_ms",
+        "unit": "ms",
+        "value": 29.894
+      },
+      {
+        "name": "sqlite_200_queries_ms",
+        "unit": "ms",
+        "value": 1.62
+      },
+      {
+        "name": "peak_working_set_bytes",
+        "unit": "bytes",
+        "value": 12500000
+      }
+    ],
+    "evidence": {
+      "uri": "file://benches/bench_data_plane.py#candidate",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  },
+  "budgets": [
+    {
+      "metric": "sharded_sprint_load_ms",
+      "unit": "ms",
+      "comparison": "at_most",
+      "threshold": 15.0
+    },
+    {
+      "metric": "journal_highwater_scan_ms",
+      "unit": "ms",
+      "comparison": "at_most",
+      "threshold": 50.0
+    },
+    {
+      "metric": "sqlite_200_queries_ms",
+      "unit": "ms",
+      "comparison": "at_most",
+      "threshold": 5.0
+    },
+    {
+      "metric": "peak_working_set_bytes",
+      "unit": "bytes",
+      "comparison": "at_most",
+      "threshold": 25000000
+    }
+  ],
+  "controls": [
+    {
+      "kind": "repository_working_set",
+      "target": "planfile.core.store_files.MAX_CACHEABLE_YAML_BYTES",
+      "limit": 5000000,
+      "unit": "bytes",
+      "mechanism": "Dynamic PLANFILE_MAX_CACHEABLE_YAML_BYTES environment governor in planfile-io StorageRuntimeConfig",
+      "verification": "tests/test_io.py::test_nohardcode_runtime_config",
+      "exception": ""
+    },
+    {
+      "kind": "append_only_read",
+      "target": "planfile_journal.read_jsonl_tail",
+      "limit": 268435456,
+      "unit": "bytes",
+      "mechanism": "Memory-mapped reverse-seek tail bounded by PLANFILE_TAIL_MAX_BYTES",
+      "verification": "tests/test_journal.py::test_read_jsonl_tail",
+      "exception": ""
+    },
+    {
+      "kind": "refresh_cache",
+      "target": "planfile_io.yaml_io.read_yaml_fast",
+      "limit": 1,
+      "unit": "count",
+      "mechanism": "TOCTOU-guarded mtime_ns and yaml_mtime_ns self-healing .fast.json mirror",
+      "verification": "tests/test_io.py::test_write_and_read_fast_and_mirror_compat",
+      "exception": ""
+    },
+    {
+      "kind": "process_resource",
+      "target": "planfile_io.data_plane.PooledSQLiteTicketIndex",
+      "limit": 2097152,
+      "unit": "bytes",
+      "mechanism": "wellmanifest/data-plane low-ram-v1 SQLite PRAGMA cache_size=-2048 and temp_store=FILE",
+      "verification": "tests/test_io.py::test_pooled_sqlite_ticket_index_and_gateway_store",
+      "exception": ""
+    },
+    {
+      "kind": "concurrency",
+      "target": "planfile_io.data_plane.DataPlaneGatewayStore",
+      "limit": 64,
+      "unit": "count",
+      "mechanism": "wellmanifest/data-gateway SAVEPOINT group-commit bounded by PLANFILE_SQLITE_MAX_BATCH",
+      "verification": "tests/test_io.py::test_pooled_sqlite_ticket_index_and_gateway_store",
+      "exception": ""
+    }
+  ],
+  "invariants": [
+    {
+      "id": "inv-functional-mirror-parity",
+      "kind": "functional",
+      "verification": "tests/test_io.py::test_write_and_read_fast_and_mirror_compat",
+      "required": true
+    },
+    {
+      "id": "inv-security-canonical-line",
+      "kind": "security",
+      "verification": "tests/test_io.py::test_data_gateway_line_and_canonical_hash",
+      "required": true
+    },
+    {
+      "id": "inv-resource-low-ram-sqlite",
+      "kind": "resource",
+      "verification": "tests/test_io.py::test_pooled_sqlite_ticket_index_and_gateway_store",
+      "required": true
+    },
+    {
+      "id": "inv-authority-single-writer-stream",
+      "kind": "authority",
+      "verification": "tests/test_io.py::test_pooled_sqlite_ticket_index_and_gateway_store",
+      "required": true
+    }
+  ],
+  "strategy": {
+    "outcome": "selective_native",
+    "rationale": "Extract YAML/JSON mirror I/O, sharded sprint merging, data-gateway line canonicalization, and journal highwater scanning into Rust crates planfile-io and planfile-journal with wellmanifest/data-plane low-ram-v1 SQLite pooling.",
+    "changedPaths": [
+      "src/config.rs",
+      "src/data_gateway.rs",
+      "src/lib.rs",
+      "src/shards.rs",
+      "src/yaml_io.rs",
+      "python/planfile_io/__init__.py",
+      "python/planfile_io/data_plane.py"
+    ],
+    "compatibility": "Preserves pure-Python fallback when HAS_RUST_IO or HAS_RUST_JOURNAL is False and supports both yaml_mtime_ns and mtime_ns mirror keys."
+  },
+  "rollout": {
+    "mechanism": "Build ABI3 wheels with maturin and enable HAS_RUST_IO and HAS_RUST_JOURNAL in planfile storage layer",
+    "scope": "semcod/planfile-io and semcod/planfile-journal",
+    "observationSeconds": 3600,
+    "abortThreshold": "Any mirror drift or SQLite integrity error above 0"
+  },
+  "rollback": {
+    "mechanism": "Disable native extension loading and fall back to pure-Python YAML and SQLite handlers",
+    "scope": "planfile_io and planfile_journal Python wrapper modules",
+    "observationSeconds": 600,
+    "abortThreshold": "Fallback latency exceeding baseline budget"
+  },
+  "authority": {
+    "requestOnly": true,
+    "executionGrantEmbedded": false
+  }
+}
