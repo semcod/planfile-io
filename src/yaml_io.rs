@@ -156,7 +156,9 @@ pub fn read_yaml_fast(yaml_path: &Path) -> Result<JsonValue, String> {
 
     // 3. TOCTOU guard: re-stat immediately after reading before caching mirror
     if stat_mtime_ns(yaml_path) == Some(current_mtime) {
-        let _ = write_mirror_envelope(&mirror, current_mtime as u64, &json_val);
+        if key.contains("/.planfile/") || key.starts_with("/tmp/") {
+            let _ = write_mirror_envelope(&mirror, current_mtime as u64, &json_val);
+        }
         if yaml_raw.len() <= 1_048_576 {
             if let Ok(mut wguard) = mem_yaml_cache().write() {
                 if wguard.len() >= MAX_MEM_CACHE_ENTRIES {
