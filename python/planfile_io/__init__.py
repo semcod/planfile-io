@@ -11,11 +11,17 @@ from typing import Any
 try:
     from .planfile_io_rs import (
         audit_mirror_fast as _rs_audit_mirror_fast,
+        batch_inventory_sprints as _rs_batch_inventory_sprints,
         canonical_digest as _rs_canonical_digest,
+        collect_committed_ticket_ids_fast as _rs_collect_committed_ticket_ids_fast,
+        collect_dir_historical_done_fast as _rs_collect_dir_historical_done_fast,
+        collect_sprint_done_fast as _rs_collect_sprint_done_fast,
         compute_event_hash as _rs_compute_event_hash,
         compute_source_signature as _rs_compute_source_signature,
+        discover_project_candidates_fast as _rs_discover_project_candidates_fast,
         format_gateway_line as _rs_format_gateway_line,
         get_runtime_config as _rs_get_runtime_config,
+        is_git_tracked_fast as _rs_is_git_tracked_fast,
         load_sharded_sprint as _rs_load_sharded_sprint,
         parse_gateway_line as _rs_parse_gateway_line,
         read_yaml_fast as _rs_read_yaml_fast,
@@ -27,11 +33,17 @@ except ImportError:
     try:
         from planfile_io_rs import (
             audit_mirror_fast as _rs_audit_mirror_fast,
+            batch_inventory_sprints as _rs_batch_inventory_sprints,
             canonical_digest as _rs_canonical_digest,
+            collect_committed_ticket_ids_fast as _rs_collect_committed_ticket_ids_fast,
+            collect_dir_historical_done_fast as _rs_collect_dir_historical_done_fast,
+            collect_sprint_done_fast as _rs_collect_sprint_done_fast,
             compute_event_hash as _rs_compute_event_hash,
             compute_source_signature as _rs_compute_source_signature,
+            discover_project_candidates_fast as _rs_discover_project_candidates_fast,
             format_gateway_line as _rs_format_gateway_line,
             get_runtime_config as _rs_get_runtime_config,
+            is_git_tracked_fast as _rs_is_git_tracked_fast,
             load_sharded_sprint as _rs_load_sharded_sprint,
             parse_gateway_line as _rs_parse_gateway_line,
             read_yaml_fast as _rs_read_yaml_fast,
@@ -180,14 +192,90 @@ def compute_event_hash(event: dict[str, Any]) -> str:
     return canonical_digest(filtered)
 
 
+def discover_project_candidates_fast(base: str | Path) -> list[str]:
+    """Discover governed and legacy Planfile project roots under base in native Rust."""
+    if HAS_RUST_IO:
+        return _rs_discover_project_candidates_fast(str(base))
+    return []
+
+
+def collect_sprint_done_fast(path: str | Path) -> list[str]:
+    """Extract completed ticket IDs from a sprint YAML / .fast.json mirror in native Rust."""
+    if HAS_RUST_IO:
+        return _rs_collect_sprint_done_fast(str(path))
+    data = read_yaml_fast(path) or {}
+    tickets = data.get("sprint", {}).get("tickets") or data.get("tickets") or {}
+    if not isinstance(tickets, dict):
+        return []
+    out: list[str] = []
+    for tid, t in tickets.items():
+        if isinstance(t, dict) and (
+            t.get("status") in ("closed", "done", "completed", "cancelled", "canceled")
+            or (isinstance(t.get("execution"), dict) and t["execution"].get("state") in ("done", "completed", "cancelled", "canceled"))
+        ):
+            out.append(str(tid))
+    return out
+
+
+def collect_dir_historical_done_fast(sprint_dir: str | Path) -> list[str]:
+    """Collect all completed ticket IDs across archived sprint files in sprint_dir in native Rust."""
+    if HAS_RUST_IO:
+        return _rs_collect_dir_historical_done_fast(str(sprint_dir))
+    sdir = Path(sprint_dir)
+    if not sdir.is_dir():
+        return []
+    union_done: set[str] = set()
+    for p in sorted(sdir.glob("*.yaml")):
+        if p.name != "current.yaml":
+            union_done.update(collect_sprint_done_fast(p))
+    return sorted(union_done)
+
+
+def batch_inventory_sprints(project_roots: list[str | Path]) -> list[dict[str, Any]]:
+    """Load current.yaml and historical_done in parallel across project_roots in native Rust."""
+    str_roots = [str(p) for p in project_roots]
+    if HAS_RUST_IO:
+        return _rs_batch_inventory_sprints(str_roots)
+    rows: list[dict[str, Any]] = []
+    for r in str_roots:
+        curr = Path(r) / ".planfile/sprints/current.yaml"
+        try:
+            data = read_yaml_fast(curr) or {}
+            hdone = collect_dir_historical_done_fast(curr.parent)
+            rows.append({"project_root": r, "data": data, "historical_done": hdone})
+        except Exception as exc:
+            rows.append({"project_root": r, "error": str(exc)})
+    return rows
+
+
+def is_git_tracked_fast(project_root: str | Path, rel_path: str | Path) -> bool | None:
+    """Check binary .git/index v2/v3 directly in Rust to see if rel_path is tracked."""
+    if HAS_RUST_IO:
+        return _rs_is_git_tracked_fast(str(project_root), str(rel_path))
+    return None
+
+
+def collect_committed_ticket_ids_fast(project_root: str | Path) -> list[str]:
+    """Scan git commits and project/ticket-*/README.md across project_root in parallel Rust threads."""
+    if HAS_RUST_IO:
+        return _rs_collect_committed_ticket_ids_fast(str(project_root))
+    return []
+
+
 __all__ = [
     "HAS_RUST_IO",
     "audit_mirror_fast",
+    "batch_inventory_sprints",
     "canonical_digest",
+    "collect_committed_ticket_ids_fast",
+    "collect_dir_historical_done_fast",
+    "collect_sprint_done_fast",
     "compute_event_hash",
     "compute_source_signature",
+    "discover_project_candidates_fast",
     "format_gateway_line",
     "get_runtime_config",
+    "is_git_tracked_fast",
     "load_sharded_sprint",
     "parse_gateway_line",
     "read_yaml_fast",

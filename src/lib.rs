@@ -1,4 +1,4 @@
-use pyo3::exceptions::{PyIOError, PyValueError};
+use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use serde_json::Value as JsonValue;
@@ -7,6 +7,7 @@ use std::path::Path;
 mod atomic;
 mod config;
 mod data_gateway;
+mod fleet_ops;
 mod shards;
 mod yaml_io;
 
@@ -173,6 +174,42 @@ fn compute_event_hash(py: Python<'_>, event: &Bound<'_, PyAny>) -> PyResult<Stri
     data_gateway::compute_event_hash(&json_val).map_err(PyValueError::new_err)
 }
 
+#[pyfunction]
+fn discover_project_candidates_fast(base: &str) -> PyResult<Vec<String>> {
+    fleet_ops::discover_project_candidates(Path::new(base)).map_err(PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+fn collect_sprint_done_fast(path: &str) -> Vec<String> {
+    fleet_ops::collect_sprint_done_fast(Path::new(path))
+}
+
+#[pyfunction]
+fn collect_dir_historical_done_fast(sprint_dir: &str) -> Vec<String> {
+    fleet_ops::collect_dir_historical_done_fast(Path::new(sprint_dir))
+}
+
+#[pyfunction]
+fn batch_inventory_sprints(py: Python<'_>, project_roots: Vec<String>) -> PyResult<PyObject> {
+    let rows = py.allow_threads(|| fleet_ops::batch_inventory_sprints(&project_roots));
+    let out = PyList::empty_bound(py);
+    for row in &rows {
+        out.append(json_to_py(py, row)?)?;
+    }
+    Ok(out.into_py(py))
+}
+
+#[pyfunction]
+fn is_git_tracked_fast(project_root: &str, rel_path: &str) -> Option<bool> {
+    fleet_ops::is_git_tracked_fast(Path::new(project_root), rel_path)
+}
+
+#[pyfunction]
+fn collect_committed_ticket_ids_fast(py: Python<'_>, project_root: &str) -> Vec<String> {
+    let root = Path::new(project_root).to_path_buf();
+    py.allow_threads(move || fleet_ops::collect_committed_ticket_ids_fast(&root))
+}
+
 #[pymodule]
 fn planfile_io_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_yaml_fast, m)?)?;
@@ -186,5 +223,11 @@ fn planfile_io_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(format_gateway_line, m)?)?;
     m.add_function(wrap_pyfunction!(canonical_digest, m)?)?;
     m.add_function(wrap_pyfunction!(compute_event_hash, m)?)?;
+    m.add_function(wrap_pyfunction!(discover_project_candidates_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(collect_sprint_done_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(collect_dir_historical_done_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(batch_inventory_sprints, m)?)?;
+    m.add_function(wrap_pyfunction!(is_git_tracked_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(collect_committed_ticket_ids_fast, m)?)?;
     Ok(())
 }

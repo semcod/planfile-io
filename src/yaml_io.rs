@@ -1,12 +1,20 @@
 use crate::atomic::atomic_write_str;
 use serde_json::Value as JsonValue;
 use serde_yaml::Value as YamlValue;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 use std::time::UNIX_EPOCH;
 
 pub const MIRROR_SUFFIX: &str = ".fast.json";
 pub const MIRROR_VERSION: u64 = 1;
+const MAX_MEM_CACHE_ENTRIES: usize = 2048;
+
+fn mem_yaml_cache() -> &'static RwLock<HashMap<String, (u128, JsonValue)>> {
+    static CACHE: OnceLock<RwLock<HashMap<String, (u128, JsonValue)>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
 
 pub fn mirror_path(yaml_path: &Path) -> PathBuf {
     let mut name = yaml_path.file_name().unwrap_or_default().to_os_string();
@@ -96,10 +104,21 @@ pub fn write_mirror_envelope(mirror: &Path, mtime_ns: u64, data: &JsonValue) -> 
 }
 
 pub fn read_yaml_fast(yaml_path: &Path) -> Result<JsonValue, String> {
-    let mirror = mirror_path(yaml_path);
     let Some(current_mtime) = stat_mtime_ns(yaml_path) else {
         return Err(format!("Failed to stat YAML {}", yaml_path.display()));
     };
+    let key = yaml_path.to_string_lossy().into_owned();
+
+    // 0. Check in-process memory cache keyed by exact (path, mtime_ns)
+    if let Ok(guard) = mem_yaml_cache().read() {
+        if let Some((cached_mtime, cached_val)) = guard.get(&key) {
+            if *cached_mtime == current_mtime {
+                return Ok(cached_val.clone());
+            }
+        }
+    }
+
+    let mirror = mirror_path(yaml_path);
 
     // 1. Check .fast.json mirror (supports both `yaml_mtime_ns` and `mtime_ns`)
     if mirror.exists() {
@@ -107,7 +126,16 @@ pub fn read_yaml_fast(yaml_path: &Path) -> Result<JsonValue, String> {
             if let Ok(parsed) = serde_json::from_str::<JsonValue>(&content) {
                 if extract_mirror_mtime(&parsed) == Some(current_mtime) {
                     if let Some(data) = parsed.get("data") {
-                        return Ok(data.clone());
+                        let out = data.clone();
+                        if content.len() <= 1_048_576 {
+                            if let Ok(mut wguard) = mem_yaml_cache().write() {
+                                if wguard.len() >= MAX_MEM_CACHE_ENTRIES {
+                                    wguard.clear();
+                                }
+                                wguard.insert(key, (current_mtime, out.clone()));
+                            }
+                        }
+                        return Ok(out);
                     }
                 }
             }
@@ -129,6 +157,14 @@ pub fn read_yaml_fast(yaml_path: &Path) -> Result<JsonValue, String> {
     // 3. TOCTOU guard: re-stat immediately after reading before caching mirror
     if stat_mtime_ns(yaml_path) == Some(current_mtime) {
         let _ = write_mirror_envelope(&mirror, current_mtime as u64, &json_val);
+        if yaml_raw.len() <= 1_048_576 {
+            if let Ok(mut wguard) = mem_yaml_cache().write() {
+                if wguard.len() >= MAX_MEM_CACHE_ENTRIES {
+                    wguard.clear();
+                }
+                wguard.insert(key, (current_mtime, json_val.clone()));
+            }
+        }
     }
 
     Ok(json_val)
@@ -172,6 +208,9 @@ pub fn audit_mirror_fast(yaml_path: &Path) -> (bool, bool, Option<String>) {
     if let Some(r) = reason {
         if let Some(mtime) = stat_mtime_ns(yaml_path) {
             let healed = write_mirror_envelope(&mirror, mtime as u64, &fresh).is_ok();
+            if let Ok(mut wguard) = mem_yaml_cache().write() {
+                wguard.insert(yaml_path.to_string_lossy().into_owned(), (mtime, fresh));
+            }
             return (false, healed, Some(r));
         }
         return (false, false, Some(r));

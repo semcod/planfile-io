@@ -7,11 +7,17 @@ import pytest
 from planfile_io import (
     HAS_RUST_IO,
     audit_mirror_fast,
+    batch_inventory_sprints,
     canonical_digest,
+    collect_committed_ticket_ids_fast,
+    collect_dir_historical_done_fast,
+    collect_sprint_done_fast,
     compute_event_hash,
     compute_source_signature,
+    discover_project_candidates_fast,
     format_gateway_line,
     get_runtime_config,
+    is_git_tracked_fast,
     load_sharded_sprint,
     parse_gateway_line,
     read_yaml_fast,
@@ -177,3 +183,49 @@ def test_pooled_sqlite_ticket_index_and_gateway_store():
         assert res2["audit_sequence"] == 2
         assert res1["audit_hash"] != res2["audit_hash"]
         gw.close()
+
+
+def test_fleet_ops_inventory_and_git_reconcile():
+    import subprocess
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        base = Path(tmp_dir)
+        proj = base / "org" / "repo-a"
+        sprints = proj / ".planfile" / "sprints"
+        sprints.mkdir(parents=True)
+
+        subprocess.run(["git", "init", str(proj)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(proj), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(proj), "config", "user.name", "Test"], check=True)
+
+        write_yaml_fast(
+            sprints / "current.yaml",
+            {"sprint": {"tickets": {"PLF-10": {"id": "PLF-10", "status": "open"}, "PLF-11": {"id": "PLF-11", "status": "done"}}}},
+        )
+        write_yaml_fast(
+            sprints / "history-001.yaml",
+            {"sprint": {"tickets": {"PLF-01": {"id": "PLF-01", "status": "closed"}, "PLF-02": {"id": "PLF-02", "status": "blocked"}}}},
+        )
+        readme = proj / "README.md"
+        readme.write_text("# Test\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(proj), "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", str(proj), "commit", "-m", "feat(PLF-10): implement ticket-007"], check=True, capture_output=True)
+
+        cands = discover_project_candidates_fast(base)
+        assert cands == [str(proj.resolve())]
+
+        assert collect_sprint_done_fast(sprints / "current.yaml") == ["PLF-11"]
+        assert collect_dir_historical_done_fast(sprints) == ["PLF-01"]
+
+        inv = batch_inventory_sprints(cands)
+        assert len(inv) == 1
+        assert inv[0]["project_root"] == str(proj.resolve())
+        assert inv[0]["historical_done"] == ["PLF-01"]
+
+        assert is_git_tracked_fast(proj, "README.md") is True
+        assert is_git_tracked_fast(proj, ".planfile/sprints/current.yaml") is False
+
+        committed = set(collect_committed_ticket_ids_fast(proj))
+        assert "PLF-10" in committed
+        assert "ticket-007" in committed
+
