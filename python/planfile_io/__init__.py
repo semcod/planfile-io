@@ -262,6 +262,30 @@ def collect_committed_ticket_ids_fast(project_root: str | Path) -> list[str]:
     return []
 
 
+def _load_dockuri_uri() -> Any:
+    import sys
+
+    try:
+        import dockuri_uri
+        return dockuri_uri
+    except ImportError:
+        cand = Path.home() / "github" / "dockuri" / "dockuri" / "python"
+        if cand.is_dir() and str(cand) not in sys.path:
+            sys.path.insert(0, str(cand))
+        import dockuri_uri
+        return dockuri_uri
+
+
+def uri(address: str, payload: Any = None, **kwargs: Any) -> Any:
+    """Universal `uri('<full-uri>', [payload_or_jsonl])` caller backed by `dockuri_uri`."""
+    return _load_dockuri_uri().uri(address, payload, **kwargs)
+
+
+def uri_jsonl(address: str, lines: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    """Stream JSONL lines or dicts into a `dockuri` URI process."""
+    return _load_dockuri_uri().uri_jsonl(address, lines, **kwargs)
+
+
 __all__ = [
     "HAS_RUST_IO",
     "audit_mirror_fast",
@@ -280,5 +304,8 @@ __all__ = [
     "parse_gateway_line",
     "read_yaml_fast",
     "resolve_shard_path",
+    "uri",
+    "uri_jsonl",
     "write_yaml_fast",
 ]
+
